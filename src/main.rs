@@ -1,115 +1,75 @@
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
+use std::fs;
 use std::time::Instant;
-use std::path::Path;
+use std::io::{self, BufRead};
+use tokio_postgres::{NoTls, Error};
 
-/// Reads Rust code from the inbox/main.rs file
-fn read_code_from_inbox() -> io::Result<String> {
-    let path = "inbox/main.rs";
-    fs::read_to_string(path)
+mod helper {
+    include!("inbox/helper.rs");
 }
 
-/// Compiles the given Rust code file
-fn compile_code(source_file: &str, output_file: &str) -> io::Result<bool> {
-    let output = Command::new("rustc")
-        .arg(source_file)
-        .arg("-o")
-        .arg(output_file)
-        .stderr(Stdio::piped())
-        .output()?;
+async fn main() -> Result<(), Error> {
+    // Connect to the database
+    let (client, connection) =
+    tokio_postgres::connect("host=localhost user=postgres password=secret dbname=rust_eval", NoTls).await?;
 
-    if !output.stderr.is_empty() {
-        eprintln!("Compilation Error:\n{}", String::from_utf8_lossy(&output.stderr));
-        return Ok(false);
-    }
-    Ok(true)
-}
-
-/// Executes the compiled binary and returns execution time
-fn execute_code(binary: &str) -> io::Result<Option<std::time::Duration>> {
-    let start_time = Instant::now();
-    let execution = Command::new(binary)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
-    
-    if execution.success() {
-        Ok(Some(start_time.elapsed()))
-    } else {
-        eprintln!("Execution failed");
-        Ok(None)
-    }
-}
-
-fn main() {
-    match read_code_from_inbox() {
-        Ok(code) => {
-            let file_path = "inbox/main.rs";
-            let binary_path = "inbox/main";
-
-            if compile_code(file_path, binary_path).unwrap_or(false) {
-                if let Ok(Some(duration)) = execute_code(binary_path) {
-                    println!("Execution time: {:.3?}", duration);
-                }
-            }
+    // Spawn the connection to run in background
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
         }
-        Err(e) => eprintln!("Failed to read code: {}", e),
+    });
+
+    let file_path = "src/test_data.txt";
+
+    // Read input string and expected output from the file
+    let (input_string, expected_output) = match read_test_data(file_path) {
+        Ok((input, output)) => (input, output),
+        Err(e) => {
+            eprintln!("❌ Failed to read test data: {}", e);
+            return;
+        }
+    };
+
+    let start = Instant::now();
+    let message = helper::get_message(&input_string);
+    let duration_ms = start.elapsed().as_millis() as i32;
+    
+    check_for_cheating(&expected_output);
+
+    check_output(&expected_output, &message);
+
+    println!("{}", message);
+    println!("Execution time: {:.3?}", duration);
+}
+
+/// Reads the input string and expected output from a file
+fn read_test_data(file_path: &str) -> io::Result<(String, String)> {
+    let file = fs::File::open(file_path)?;
+    let mut lines = io::BufReader::new(file).lines();
+
+    let input_string = lines.next().unwrap_or(Ok(String::new()))?;
+    let expected_output = lines.next().unwrap_or(Ok(String::new()))?;
+
+    Ok((input_string, expected_output))
+}
+
+// ✅ Checks for cheating by seeing if the answer string is in helper.rs
+fn check_for_cheating(expected_output: &str) {
+    let helper_code = fs::read_to_string("src/inbox/helper.rs")
+    .expect("Failed to read helper.rs");
+
+    if helper_code.contains(expected_output) {
+        println!("❌ Check failed: expected output found in helper.rs!");
+    } else {
+        println!("✅ Check passed: expected output NOT found in helper.rs!");
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_read_code_from_inbox() {
-        let test_code = "fn main() { println!(\"Hello, test!\"); }";
-        let path = "inbox/main.rs";
-
-        // Ensure the inbox directory exists
-        fs::create_dir_all("inbox").unwrap();
-        let mut file = File::create(path).unwrap();
-        file.write_all(test_code.as_bytes()).unwrap();
-
-        let code = read_code_from_inbox().unwrap();
-        assert_eq!(code, test_code);
-
-        // Cleanup
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn test_compile_code_success() {
-        let test_code = "fn main() { println!(\"Hello, compile test!\"); }";
-        let path = "inbox/main.rs";
-        let binary_path = "inbox/main";
-
-        fs::create_dir_all("inbox").unwrap();
-        let mut file = File::create(path).unwrap();
-        file.write_all(test_code.as_bytes()).unwrap();
-
-        let result = compile_code(path, binary_path).unwrap();
-        assert!(result);
-
-        // Cleanup
-        fs::remove_file(path).unwrap();
-        fs::remove_file(binary_path).unwrap();
-    }
-
-    #[test]
-    fn test_compile_code_failure() {
-        let test_code = "fn main() { syntax error! }"; // Invalid Rust
-        let path = "inbox/main.rs";
-
-        fs::create_dir_all("inbox").unwrap();
-        let mut file = File::create(path).unwrap();
-        file.write_all(test_code.as_bytes()).unwrap();
-
-        let result = compile_code(path, "inbox/main").unwrap();
-        assert!(!result);
-
-        // Cleanup
-        fs::remove_file(path).unwrap();
+// ✅ Check if the expected output and actual output are the same
+fn check_output(expected_output: &str, actual_output: &str) {
+    if expected_output == actual_output {
+        println!("✅ Check passed: expected output and actual output match!");
+    } else {
+        println!("❌ Check failed: expected output and actual output do not match!");
     }
 }
